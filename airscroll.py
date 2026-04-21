@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import argparse
 import collections
+import math
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-import math
 from typing import Deque, Optional
 
 import cv2
@@ -31,6 +31,11 @@ except ModuleNotFoundError:
     Controller = None
     Key = None
 
+try:
+    import psutil
+except ModuleNotFoundError:
+    psutil = None
+
 
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
@@ -44,6 +49,12 @@ class Sample:
     tip_y: float
     knuckle_x: float
     knuckle_y: float
+    middle_rel_x: float
+    middle_rel_y: float
+    ring_rel_x: float
+    ring_rel_y: float
+    pinky_rel_x: float
+    pinky_rel_y: float
 
 
 @dataclass
@@ -53,7 +64,7 @@ class DetectionDebug:
     finger_lead_y: float = 0.0
     velocity_y: float = 0.0
     drift_x: float = 0.0
-    index_extension: float = 0.0
+    other_finger_motion: float = 0.0
     cooldown_remaining: float = 0.0
 
 
@@ -65,6 +76,7 @@ class FlickDetector:
         min_finger_lead: float,
         min_velocity: float,
         max_horizontal_drift: float,
+        max_other_finger_motion: float,
         cooldown_seconds: float,
     ) -> None:
         self.history_seconds = history_seconds
@@ -72,6 +84,7 @@ class FlickDetector:
         self.min_finger_lead = min_finger_lead
         self.min_velocity = min_velocity
         self.max_horizontal_drift = max_horizontal_drift
+        self.max_other_finger_motion = max_other_finger_motion
         self.cooldown_seconds = cooldown_seconds
         self.samples: Deque[Sample] = collections.deque()
         self.last_trigger_time = 0.0
@@ -83,9 +96,29 @@ class FlickDetector:
         tip_y: float,
         knuckle_x: float,
         knuckle_y: float,
+        middle_rel_x: float,
+        middle_rel_y: float,
+        ring_rel_x: float,
+        ring_rel_y: float,
+        pinky_rel_x: float,
+        pinky_rel_y: float,
     ) -> tuple[bool, DetectionDebug]:
         debug = DetectionDebug()
-        self.samples.append(Sample(now, tip_x, tip_y, knuckle_x, knuckle_y))
+        self.samples.append(
+            Sample(
+                now,
+                tip_x,
+                tip_y,
+                knuckle_x,
+                knuckle_y,
+                middle_rel_x,
+                middle_rel_y,
+                ring_rel_x,
+                ring_rel_y,
+                pinky_rel_x,
+                pinky_rel_y,
+            )
+        )
 
         while self.samples and now - self.samples[0].timestamp > self.history_seconds:
             self.samples.popleft()
@@ -106,6 +139,11 @@ class FlickDetector:
         peak_relative_x = peak.tip_x - peak.knuckle_x
         end_relative_x = end.tip_x - end.knuckle_x
         debug.drift_x = abs(end_relative_x - peak_relative_x)
+        debug.other_finger_motion = max(
+            math.hypot(end.middle_rel_x - peak.middle_rel_x, end.middle_rel_y - peak.middle_rel_y),
+            math.hypot(end.ring_rel_x - peak.ring_rel_x, end.ring_rel_y - peak.ring_rel_y),
+            math.hypot(end.pinky_rel_x - peak.pinky_rel_x, end.pinky_rel_y - peak.pinky_rel_y),
+        )
         debug.cooldown_remaining = max(0.0, self.cooldown_seconds - (now - self.last_trigger_time))
 
         should_trigger = (
@@ -114,6 +152,7 @@ class FlickDetector:
             and debug.finger_lead_y >= self.min_finger_lead
             and debug.velocity_y >= self.min_velocity
             and debug.drift_x <= self.max_horizontal_drift
+            and debug.other_finger_motion <= self.max_other_finger_motion
         )
 
         if should_trigger:
@@ -166,31 +205,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-travel", type=float, default=0.065)
     parser.add_argument("--min-finger-lead", type=float, default=0.035)
     parser.add_argument("--min-velocity", type=float, default=0.22)
-    parser.add_argument("--min-index-extension", type=float, default=0.45)
     parser.add_argument("--max-horizontal-drift", type=float, default=0.2)
-    parser.add_argument("--cooldown-seconds", type=float, default=0.9)
+    parser.add_argument("--max-other-finger-motion", type=float, default=0.06)
+    parser.add_argument("--cooldown-seconds", type=float, default=1.2)
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Detect the flick and show it on screen without sending a keyboard event.",
     )
     return parser
-
-
-def point_distance(a, b) -> float:
-    return math.hypot(a.x - b.x, a.y - b.y)
-
-
-def compute_index_extension(landmarks) -> float:
-    index_tip = landmarks[mp_hands.HandLandmark.INDEX_FINGER_TIP]
-    index_pip = landmarks[mp_hands.HandLandmark.INDEX_FINGER_PIP]
-    index_mcp = landmarks[mp_hands.HandLandmark.INDEX_FINGER_MCP]
-    wrist = landmarks[mp_hands.HandLandmark.WRIST]
-    middle_mcp = landmarks[mp_hands.HandLandmark.MIDDLE_FINGER_MCP]
-
-    palm_scale = max(point_distance(wrist, middle_mcp), 1e-6)
-    extension_amount = point_distance(index_tip, index_mcp) - point_distance(index_pip, index_mcp)
-    return extension_amount / palm_scale
 
 
 def draw_status(
@@ -201,21 +224,26 @@ def draw_status(
     key_error: Optional[str],
     last_fired_at: float,
     hand_visible: bool,
-    index_ready: bool,
+    fps: float,
+    cpu_usage: Optional[float],
 ) -> None:
+    
+
+
+
     lines = [
-        "Press q to quit",
         f"Mode: {'dry-run' if dry_run else 'send Down Arrow'}",
         f"Tracking: {'hand found' if hand_visible else 'show your hand'}",
-        f"Index: {'extended' if index_ready else 'extend index finger'}",
         f"Triggers: {trigger_count}",
         f"Tip travel: {debug.tip_travel_y:.3f}",
         f"Knuckle travel: {debug.knuckle_travel_y:.3f}",
         f"Finger lead: {debug.finger_lead_y:.3f}",
         f"Lead velocity: {debug.velocity_y:.3f}",
-        f"Index extension: {debug.index_extension:.3f}",
         f"Drift X: {debug.drift_x:.3f}",
+        f"Other finger motion: {debug.other_finger_motion:.3f}",
         f"Cooldown: {debug.cooldown_remaining:.2f}s",
+        f"FPS: {fps:.1f}",
+        f"CPU: {cpu_usage:.1f}%" if cpu_usage is not None else "CPU: N/A",
     ]
 
     if last_fired_at > 0:
@@ -239,6 +267,15 @@ def draw_status(
 
 
 def main() -> int:
+
+    import os
+
+    try:
+        os.nice(-19)
+    except PermissionError:
+        print("Not allowed to decrease niceness without elevated privileges.")
+
+
     args = build_parser().parse_args()
 
     cap = cv2.VideoCapture(args.camera_index)
@@ -251,11 +288,17 @@ def main() -> int:
         min_finger_lead=args.min_finger_lead,
         min_velocity=args.min_velocity,
         max_horizontal_drift=args.max_horizontal_drift,
+        max_other_finger_motion=args.max_other_finger_motion,
         cooldown_seconds=args.cooldown_seconds,
     )
     key_controller = DownKeyController(enabled=not args.dry_run)
     trigger_count = 0
     last_fired_at = 0.0
+
+    prev_frame_time = 0
+    process = psutil.Process() if psutil is not None else None
+    if process is not None:
+        process.cpu_percent(1)
 
     with mp_hands.Hands(
         model_complexity=0,
@@ -273,7 +316,6 @@ def main() -> int:
             results = hands.process(rgb_frame)
             debug = DetectionDebug()
             hand_visible = False
-            index_ready = False
 
             if results.multi_hand_landmarks:
                 hand_landmarks = results.multi_hand_landmarks[0]
@@ -281,32 +323,36 @@ def main() -> int:
                 hand_visible = True
                 index_tip = landmarks[mp_hands.HandLandmark.INDEX_FINGER_TIP]
                 index_mcp = landmarks[mp_hands.HandLandmark.INDEX_FINGER_MCP]
-                index_extension = compute_index_extension(landmarks)
-                debug.index_extension = index_extension
-                index_ready = index_extension >= args.min_index_extension
+                middle_tip = landmarks[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+                middle_mcp = landmarks[mp_hands.HandLandmark.MIDDLE_FINGER_MCP]
+                ring_tip = landmarks[mp_hands.HandLandmark.RING_FINGER_TIP]
+                ring_mcp = landmarks[mp_hands.HandLandmark.RING_FINGER_MCP]
+                pinky_tip = landmarks[mp_hands.HandLandmark.PINKY_TIP]
+                pinky_mcp = landmarks[mp_hands.HandLandmark.PINKY_MCP]
 
-                if index_ready:
-                    now = time.monotonic()
-                    triggered, motion_debug = detector.update(
-                        now,
-                        tip_x=index_tip.x,
-                        tip_y=index_tip.y,
-                        knuckle_x=index_mcp.x,
-                        knuckle_y=index_mcp.y,
-                    )
-                    motion_debug.index_extension = index_extension
-                    debug = motion_debug
+                now = time.monotonic()
+                triggered, debug = detector.update(
+                    now,
+                    tip_x=index_tip.x,
+                    tip_y=index_tip.y,
+                    knuckle_x=index_mcp.x,
+                    knuckle_y=index_mcp.y,
+                    middle_rel_x=middle_tip.x - middle_mcp.x,
+                    middle_rel_y=middle_tip.y - middle_mcp.y,
+                    ring_rel_x=ring_tip.x - ring_mcp.x,
+                    ring_rel_y=ring_tip.y - ring_mcp.y,
+                    pinky_rel_x=pinky_tip.x - pinky_mcp.x,
+                    pinky_rel_y=pinky_tip.y - pinky_mcp.y,
+                )
 
-                    if triggered:
-                        key_controller.press_down()
-                        trigger_count += 1
-                        last_fired_at = time.time()
-                else:
-                    detector.samples.clear()
+                if triggered:
+                    key_controller.press_down()
+                    trigger_count += 1
+                    last_fired_at = time.time()
 
                 tip_x = int(index_tip.x * frame.shape[1])
                 tip_y = int(index_tip.y * frame.shape[0])
-                tip_color = (0, 220, 120) if index_ready else (0, 140, 255)
+                tip_color = (0, 220, 120)
                 cv2.circle(frame, (tip_x, tip_y), 14, tip_color, -1)
 
                 mp_drawing.draw_landmarks(
@@ -319,6 +365,11 @@ def main() -> int:
             else:
                 detector.samples.clear()
 
+            new_frame_time = time.time()
+            fps = 0.0 if prev_frame_time == 0 else 1 / max(new_frame_time - prev_frame_time, 1e-6)
+            prev_frame_time = new_frame_time
+            cpu_usage = process.cpu_percent(interval=None) if process is not None else None
+
             draw_status(
                 frame=frame,
                 debug=debug,
@@ -327,7 +378,8 @@ def main() -> int:
                 key_error=key_controller.error,
                 last_fired_at=last_fired_at,
                 hand_visible=hand_visible,
-                index_ready=index_ready,
+                fps=fps,
+                cpu_usage=cpu_usage,
             )
 
             cv2.imshow("AirScroll", frame)
