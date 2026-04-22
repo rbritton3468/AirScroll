@@ -6,8 +6,9 @@ AirScroll watches your index finger through the webcam and presses the Down Arro
 
 - MediaPipe Hands tracks a single hand in real time.
 - The program tracks your index fingertip relative to the base knuckle of that same finger.
-- It does not require the "one index finger only" pose anymore, but it does require the index finger to be extended.
+- It does not require the "one index finger only" pose anymore.
 - It only triggers when the fingertip moves upward more than the knuckle, which helps reject whole-hand lifts.
+- It can also require your other fingers to stay mostly still during the swipe.
 - A cooldown prevents the gesture from firing multiple times from the same flick.
 
 ## Setup
@@ -43,20 +44,20 @@ python3 airscroll.py
 
 Press `q` to quit.
 
-Swipe your index finger upward in the camera view. The fingertip dot turns green when the index finger is extended enough to arm the detector.
+Swipe your index finger upward in the camera view. The fingertip dot stays green whenever your hand is being tracked.
 
 ## Tuning
 
 If it fires too easily, raise one or more of these:
 
 ```bash
-python3 airscroll.py --min-travel 0.08 --min-finger-lead 0.05 --min-index-extension 0.55 --min-velocity 0.3 --max-horizontal-drift 0.16 --cooldown-seconds 0.75
+python3 airscroll.py --min-travel 0.08 --min-finger-lead 0.05 --min-velocity 0.3 --max-horizontal-drift 0.16 --max-other-finger-motion 0.04 --cooldown-seconds 0.75
 ```
 
 If it misses your flicks, lower one or more of these:
 
 ```bash
-python3 airscroll.py --min-travel 0.05 --min-finger-lead 0.02 --min-index-extension 0.35 --min-velocity 0.16 --max-horizontal-drift 0.28
+python3 airscroll.py --min-travel 0.05 --min-finger-lead 0.02 --min-velocity 0.16 --max-horizontal-drift 0.28 --max-other-finger-motion 0.09
 ```
 
 Useful flags:
@@ -64,6 +65,6 @@ Useful flags:
 - `--camera-index 1` to switch webcams
 - `--dry-run` to disable keyboard events
 - `--min-finger-lead` to require the fingertip to move more than the knuckle
-- `--min-index-extension` to require the index finger to be extended before a swipe can trigger
 - `--max-horizontal-drift` to allow more or less sideways motion during the swipe
+- `--max-other-finger-motion` to limit how much the middle, ring, and pinky can move during the swipe
 - `--history-seconds` to change how much recent fingertip motion is considered part of one swipe
